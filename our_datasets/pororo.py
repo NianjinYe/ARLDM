@@ -1,4 +1,5 @@
 import random
+import os
 
 import cv2
 import h5py
@@ -9,7 +10,7 @@ from torchvision import transforms
 from transformers import CLIPTokenizer
 
 from models.blip_override.blip import init_tokenizer
-
+  
 
 class StoryDataset(Dataset):
     """
@@ -31,7 +32,7 @@ class StoryDataset(Dataset):
         ])
         self.dataset = args.dataset
         self.max_length = args.get(args.dataset).max_length
-        self.clip_tokenizer = CLIPTokenizer.from_pretrained('runwayml/stable-diffusion-v1-5', subfolder="tokenizer")
+        self.clip_tokenizer = CLIPTokenizer.from_pretrained('/mnt/share_disk/yenianjin/data/stable-diffusion-v1-5', subfolder="tokenizer")
         self.blip_tokenizer = init_tokenizer()
         msg = self.clip_tokenizer.add_tokens(list(args.get(args.dataset).new_tokens))
         print("clip {} new tokens added".format(msg))
@@ -85,9 +86,12 @@ class StoryDataset(Dataset):
             return_tensors="pt",
         )
         source_caption, source_attention_mask = tokenized['input_ids'], tokenized['attention_mask']
-        return images, captions, attention_mask, source_images, source_caption, source_attention_mask
+        return images, captions, attention_mask, source_images, source_caption, source_attention_mask, texts
 
     def __len__(self):
         if not hasattr(self, 'h5'):
             self.open_h5()
-        return len(self.h5['text'])
+        if self.subset=="test":
+          return len(self.h5['text'])
+        else:
+          return len(self.h5['text'])

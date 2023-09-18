@@ -1,5 +1,11 @@
 import inspect
 import os
+import pdb
+
+import sys
+sys.path.append(".")
+sys.path.append("..")
+sys.path.append("...") 
 
 import hydra
 import numpy as np
@@ -7,7 +13,7 @@ import pytorch_lightning as pl
 import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 from diffusers import AutoencoderKL, DDPMScheduler, LMSDiscreteScheduler, PNDMScheduler, DDIMScheduler
 from omegaconf import DictConfig
 from pl_bolts.optimizers.lr_scheduler import LinearWarmupCosineAnnealingLR
@@ -34,13 +40,13 @@ class LightningDataset(pl.LightningDataModule):
 
     def setup(self, stage="fit"):
         if self.args.dataset == "pororo":
-            import datasets.pororo as data
+            import our_datasets.pororo as data
         elif self.args.dataset == 'flintstones':
-            import datasets.flintstones as data
+            import our_datasets.flintstones as data
         elif self.args.dataset == 'vistsis':
-            import datasets.vistsis as data
+            import our_datasets.vistsis as data
         elif self.args.dataset == 'vistdii':
-            import datasets.vistdii as data
+            import our_datasets.vistdii as data
         else:
             raise ValueError("Unknown dataset: {}".format(self.args.dataset))
         if stage == "fit":
@@ -154,7 +160,7 @@ class ARLDM(pl.LightningModule):
 
     @staticmethod
     def freeze_params(params):
-        for param in params:
+        for param in params: # the weights param share the same memory
             param.requires_grad = False
 
     @staticmethod
@@ -181,12 +187,13 @@ class ARLDM(pl.LightningModule):
             self.text_encoder.eval()
         if self.args.freeze_blip and hasattr(self, "mm_encoder"):
             self.mm_encoder.eval()
-        images, captions, attention_mask, source_images, source_caption, source_attention_mask = batch
+        # source_ means the BLIP outputs
+        images, captions, attention_mask, source_images, source_caption, source_attention_mask, texts = batch
         B, V, S = captions.shape
         src_V = V + 1 if self.task == 'continuation' else V
         images = torch.flatten(images, 0, 1)
         captions = torch.flatten(captions, 0, 1)
-        attention_mask = torch.flatten(attention_mask, 0, 1)
+        attention_mask = torch.flatten(attention_mask, 0, 1) 
         source_images = torch.flatten(source_images, 0, 1)
         source_caption = torch.flatten(source_caption, 0, 1)
         source_attention_mask = torch.flatten(source_attention_mask, 0, 1)
@@ -233,9 +240,11 @@ class ARLDM(pl.LightningModule):
         return loss
 
     def sample(self, batch):
-        original_images, captions, attention_mask, source_images, source_caption, source_attention_mask = batch
+        # original_images shape: bs, 5 (continue frames), h, w, c
+        original_images, captions, attention_mask, source_images, source_caption, source_attention_mask, texts = batch
         B, V, S = captions.shape
-        src_V = V + 1 if self.task == 'continuation' else V
+        (src_V) = V + 1 if self.task == 'continuation' else V
+      
         original_images = torch.flatten(original_images, 0, 1)
         captions = torch.flatten(captions, 0, 1)
         attention_mask = torch.flatten(attention_mask, 0, 1)
@@ -299,7 +308,7 @@ class ARLDM(pl.LightningModule):
             encoder_hidden_states[:, (i + 1 + src_V - V) * S:(i + 2 + src_V - V) * S] = new_embedding
             encoder_hidden_states = torch.cat([uncond_embeddings, encoder_hidden_states])
 
-        return original_images, images
+        return original_images, images, captions
 
     def training_step(self, batch, batch_idx):
         loss = self(batch)
@@ -311,7 +320,9 @@ class ARLDM(pl.LightningModule):
         self.log('loss/val_loss', loss, on_step=False, on_epoch=True, sync_dist=True, prog_bar=True)
 
     def predict_step(self, batch, batch_idx, dataloader_idx=0):
-        original_images, images = self.sample(batch)
+        original_images, images, captions = self.sample(batch) 
+        
+        texts = batch[-1]
         if self.args.calculate_fid:
             original_images = original_images.cpu().numpy().astype('uint8')
             original_images = [Image.fromarray(im, 'RGB') for im in original_images]
@@ -320,7 +331,7 @@ class ARLDM(pl.LightningModule):
         else:
             ori = None
             gen = None
-        return images, ori, gen
+        return images, ori, gen, texts
 
     def diffusion(self, encoder_hidden_states, attention_mask, height, width, num_inference_steps, guidance_scale, eta):
         latents = torch.randn((encoder_hidden_states.shape[0] // 2, self.unet.in_channels, height // 8, width // 8),
@@ -418,8 +429,22 @@ def train(args: DictConfig) -> None:
         strategy=DDPStrategy(find_unused_parameters=False)
     )
     trainer.fit(model, dataloader, ckpt_path=args.train_model_file)
-
-
+ 
+def log_txt_as_img(caption, wh=(512, 512), size=20):
+    # wh a tuple of (width, height)
+    # caption to plot
+    txt_image = Image.new("RGB", wh, color="white")
+    draw = ImageDraw.Draw(txt_image)
+    font = ImageFont.truetype('font/DejaVuSans.ttf', size=size)
+    nc = int(20 * (wh[0] / 256))
+    lines = "\n".join(caption[start:start + nc] for start in range(0, len(caption), nc)) 
+    try:
+        draw.text((0, 0), lines, fill="black", font=font)
+    except UnicodeEncodeError:
+        print("Cant encode string for logging. Skipping.")
+    # txt_image = np.array(txt_image) / 127.5 - 1.0 # to array
+    return txt_image   
+  
 def sample(args: DictConfig) -> None:
     assert args.test_model_file is not None, "test_model_file cannot be None"
     assert args.gpu_ids == 1 or len(args.gpu_ids) == 1, "Only one GPU is supported in test mode"
@@ -433,21 +458,27 @@ def sample(args: DictConfig) -> None:
         max_epochs=-1,
         benchmark=True
     )
-    predictions = predictor.predict(model, dataloader)
-    images = [elem for sublist in predictions for elem in sublist[0]]
+ 
+    predictions = predictor.predict(model, dataloader) 
+    images = [elem for sublist in predictions for elem in sublist[0]] 
+    # images is flatten already: 4×5 -> 20
+ 
+    text_images = [log_txt_as_img(text) for sublist in predictions for texts in sublist[3] for text in texts] 
     if not os.path.exists(args.sample_output_dir):
         try:
             os.mkdir(args.sample_output_dir)
         except:
             pass
+    
     for i, image in enumerate(images):
-        image.save(os.path.join(args.sample_output_dir, '{:04d}.png'.format(i)))
+        images[i].save(os.path.join(args.sample_output_dir, '{:04d}.png'.format(i)))
+        text_images[i].save(os.path.join(args.sample_output_dir, '{:04d}_caption.png'.format(i))) 
 
     if args.calculate_fid:
         ori = np.array([elem for sublist in predictions for elem in sublist[1]])
         gen = np.array([elem for sublist in predictions for elem in sublist[2]])
-        fid = calculate_fid_given_features(ori, gen)
-        print('FID: {}'.format(fid))
+        # fid = calculate_fid_given_features(ori, gen) # bug exits
+        # print('FID: {}'.format(fid))
 
 
 @hydra.main(config_path=".", config_name="config")

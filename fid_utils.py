@@ -15,7 +15,8 @@ def calculate_frechet_distance(mu1, sigma1, mu2, sigma2, eps=1e-6):
     diff = mu1 - mu2
 
     # Product might be almost singular
-    covmean, _ = linalg.sqrtm(sigma1.dot(sigma2), disp=False)
+    covmean, _ = linalg.sqrtm(sigma1.dot(sigma2), disp=False) # maxtrix square root
+ 
     if not np.isfinite(covmean).all():
         print('fid calculation produces singular product; adding %s to diagonal of cov estimates' % eps)
         offset = np.eye(sigma1.shape[0]) * eps
