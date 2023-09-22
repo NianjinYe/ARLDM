@@ -102,7 +102,7 @@ class ARLDM(pl.LightningModule):
             block_idx = InceptionV3.BLOCK_INDEX_BY_DIM[2048]
             self.inception = InceptionV3([block_idx])
 
-        self.clip_tokenizer = CLIPTokenizer.from_pretrained('runwayml/stable-diffusion-v1-5', subfolder="tokenizer")
+        self.clip_tokenizer = CLIPTokenizer.from_pretrained('/mnt/share_disk/yenianjin/data/stable-diffusion-v1-5', subfolder="tokenizer")
         self.blip_tokenizer = init_tokenizer()
         self.blip_image_processor = transforms.Compose([
             transforms.Resize([224, 224]),
@@ -122,7 +122,7 @@ class ARLDM(pl.LightningModule):
         self.register_buffer('blip_text_null_token', blip_text_null_token)
         self.register_buffer('blip_image_null_token', blip_image_null_token)
 
-        self.text_encoder = CLIPTextModel.from_pretrained('runwayml/stable-diffusion-v1-5',
+        self.text_encoder = CLIPTextModel.from_pretrained('/mnt/share_disk/yenianjin/data/stable-diffusion-v1-5',
                                                           subfolder="text_encoder")
         self.text_encoder.resize_token_embeddings(args.get(args.dataset).clip_embedding_tokens)
         # resize_position_embeddings
@@ -136,12 +136,12 @@ class ARLDM(pl.LightningModule):
         self.modal_type_embeddings = nn.Embedding(2, 768)
         self.time_embeddings = nn.Embedding(5, 768)
         self.mm_encoder = blip_feature_extractor(
-            pretrained='https://storage.googleapis.com/sfr-vision-language-research/BLIP/models/model_large.pth',
+            pretrained='/mnt/share_disk/yenianjin/data/checkpoints/model_large.pth',
             image_size=224, vit='large')
         self.mm_encoder.text_encoder.resize_token_embeddings(args.get(args.dataset).blip_embedding_tokens)
 
-        self.vae = AutoencoderKL.from_pretrained('runwayml/stable-diffusion-v1-5', subfolder="vae")
-        self.unet = UNet2DConditionModel.from_pretrained('runwayml/stable-diffusion-v1-5', subfolder="unet")
+        self.vae = AutoencoderKL.from_pretrained('/mnt/share_disk/yenianjin/data/stable-diffusion-v1-5', subfolder="vae")
+        self.unet = UNet2DConditionModel.from_pretrained('/mnt/share_disk/yenianjin/data/stable-diffusion-v1-5', subfolder="unet")
         self.noise_scheduler = DDPMScheduler(beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear",
                                              num_train_timesteps=1000)
 
@@ -203,7 +203,7 @@ class ARLDM(pl.LightningModule):
 
         caption_embeddings = self.text_encoder(captions, attention_mask).last_hidden_state  # B * V, S, D
         source_embeddings = self.mm_encoder(source_images, source_caption, source_attention_mask,
-                                            mode='multimodal').reshape(B, src_V * S, -1)
+                                            mode='multimodal').reshape(B, src_V * S, -1) # source_image got from blip_image_processor
         source_embeddings = source_embeddings.repeat_interleave(V, dim=0)
         caption_embeddings[classifier_free_idx] = \
             self.text_encoder(self.clip_text_null_token).last_hidden_state[0]
@@ -212,8 +212,7 @@ class ARLDM(pl.LightningModule):
                             mode='multimodal')[0].repeat(src_V, 1)
         caption_embeddings += self.modal_type_embeddings(torch.tensor(0, device=self.device))
         source_embeddings += self.modal_type_embeddings(torch.tensor(1, device=self.device))
-        source_embeddings += self.time_embeddings(
-            torch.arange(src_V, device=self.device).repeat_interleave(S, dim=0))
+        source_embeddings += self.time_embeddings( torch.arange(src_V, device=self.device).repeat_interleave(S, dim=0))
         encoder_hidden_states = torch.cat([caption_embeddings, source_embeddings], dim=1)
 
         attention_mask = torch.cat(
@@ -243,18 +242,18 @@ class ARLDM(pl.LightningModule):
         # original_images shape: bs, 5 (continue frames), h, w, c
         original_images, captions, attention_mask, source_images, source_caption, source_attention_mask, texts = batch
         B, V, S = captions.shape
-        (src_V) = V + 1 if self.task == 'continuation' else V
-      
-        original_images = torch.flatten(original_images, 0, 1)
+        (src_V) = V + 1 if self.task == 'continuation' else V # continuation task V = 4, visualization task V = 5
+
+        # flatten the batchsize and frames dims
+        original_images = torch.flatten(original_images, 0, 1) 
         captions = torch.flatten(captions, 0, 1)
         attention_mask = torch.flatten(attention_mask, 0, 1)
         source_images = torch.flatten(source_images, 0, 1)
         source_caption = torch.flatten(source_caption, 0, 1)
         source_attention_mask = torch.flatten(source_attention_mask, 0, 1)
-
-        caption_embeddings = self.text_encoder(captions, attention_mask).last_hidden_state  # B * V, S, D
-        source_embeddings = self.mm_encoder(source_images, source_caption, source_attention_mask,
-                                            mode='multimodal').reshape(B, src_V * S, -1)
+         
+        caption_embeddings = self.text_encoder(captions, attention_mask).last_hidden_state  # B * V, S, D torch.Size([5, 85, 768])
+        source_embeddings = self.mm_encoder(source_images, source_caption, source_attention_mask, mode='multimodal').reshape(B, src_V * S, -1) # torch.Size([1, 425, 768])
         caption_embeddings += self.modal_type_embeddings(torch.tensor(0, device=self.device))
         source_embeddings += self.modal_type_embeddings(torch.tensor(1, device=self.device))
         source_embeddings += self.time_embeddings(
@@ -264,6 +263,7 @@ class ARLDM(pl.LightningModule):
 
         attention_mask = torch.cat(
             [attention_mask, source_attention_mask.reshape(B, src_V * S).repeat_interleave(V, dim=0)], dim=1)
+        pdb.set_trace()
         attention_mask = ~(attention_mask.bool())  # B * V, (src_V + 1) * S
         # B, V, V, S
         square_mask = torch.triu(torch.ones((V, V), device=self.device)).bool()

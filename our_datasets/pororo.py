@@ -67,7 +67,12 @@ class StoryDataset(Dataset):
             if self.subset in ['train', 'val'] else torch.from_numpy(np.array(images))
 
         texts = self.h5['text'][index].decode('utf-8').split('|')
-
+        # texts = ["pororo is fishing, while the sky is getting dark gradually", 
+        #          "Poby held Harry in the palm of his hand", 
+        #          "eddy and loopy are drinking juice in the wood house", 
+        #          "tongtong struggled through the blizzard along",
+        #          "crong struggled through the blizzard along."
+        #          ]
         # tokenize caption using default tokenizer
         tokenized = self.clip_tokenizer(
             texts[1:] if self.args.task == 'continuation' else texts,
@@ -92,6 +97,6 @@ class StoryDataset(Dataset):
         if not hasattr(self, 'h5'):
             self.open_h5()
         if self.subset=="test":
-          return len(self.h5['text'])
+          return 1 # len(self.h5['text'])
         else:
           return len(self.h5['text'])
